@@ -53,6 +53,9 @@ class Settings:
         self.RABBITMQ_OUTPUT_QUEUE_NAME: str = os.getenv(
             "RABBITMQ_OUTPUT_QUEUE_NAME", ""
         )
+        self.RABBITMQ_UI_NOTIFY_EXCHANGE: str = os.getenv(
+            "RABBITMQ_UI_NOTIFY_EXCHANGE", ""
+        )
         self.RABBITMQ_URL = (
             f"amqp://{self.RABBITMQ_USER}:{self.RABBITMQ_PASS}@{self.RABBITMQ_HOST}/"
         )
