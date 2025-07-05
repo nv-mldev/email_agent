@@ -1,0 +1,39 @@
+graph TD
+    subgraph "Backend Services"
+        A[Email Polling Service]
+        B[Email Parser Service]
+        C[Document Analysis Service]
+    end
+
+    subgraph "API & UI Layer"
+        D[FastAPI Server]
+        E[fa:fa-window-maximize Internal Review UI]
+    end
+
+    subgraph "RabbitMQ Message Broker"
+        direction LR
+        subgraph "Job Pipeline (Direct Queues)"
+            Q1[email_processing_queue]
+            Q2[document_analysis_queue]
+        end
+        subgraph "UI Notification (Broadcast Exchange)"
+            X1((fa:fa-bullhorn ui_notifications_exchange))
+        end
+    end
+
+    %% --- Job Pipeline Flow ---
+    A -- "1.Publishes Job" --> Q1
+    Q1 -- "2.Consumes Job" --> B
+    B -- "3.Publishes Job" --> Q2
+    Q2 -- "4.Consumes Job" --> C
+
+    %% --- UI Event Flow ---
+    A -- "Publishes 'Email Received' Event" --> X1
+    C -- "Publishes 'Analysis Complete' Event" --> X1
+    D -- "Listens to ALL events" --> X1
+    D -.->|WebSocket Push| E
+
+    %% --- Styling ---
+    linkStyle 0,1,2,3 stroke:#3498db,stroke-width:2px,color:blue;
+    linkStyle 4,5,6 stroke:#2ecc71,stroke-width:2px;
+    linkStyle 7 stroke:grey,stroke-width:2px,stroke-dasharray: 5 5;

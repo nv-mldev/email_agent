@@ -1,5 +1,6 @@
 # email_polling_service/graph_client.py
 
+import logging
 from core.config import settings
 from azure.identity.aio import ClientSecretCredential
 from msgraph.graph_service_client import GraphServiceClient
@@ -8,6 +9,8 @@ from msgraph.generated.users.item.messages.messages_request_builder import (
 )
 from msgraph.generated.models.message import Message
 from kiota_abstractions.api_error import APIError
+
+logger = logging.getLogger(__name__)
 
 
 class GraphClient:
@@ -30,10 +33,10 @@ class GraphClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.credential:
             await self.credential.close()
-        print("Polling Graph client resources closed.")
+        logger.info("Polling Graph client resources closed.")
 
     async def fetch_unread_messages(self) -> list[Message]:
-        print("Checking for unread messages...")
+        logger.info("Checking for unread messages...")
         try:
             query_params = (
                 MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
@@ -64,7 +67,7 @@ class GraphClient:
             ).messages.get(request_configuration=request_config)
             return messages_page.value if messages_page and messages_page.value else []
         except APIError as e:
-            print(f"Graph API Error fetching messages: {e.message}")
+            logger.error("Graph API Error fetching messages: %s", e.message)
         return []
 
     async def mark_message_as_read(self, message_id: str):
@@ -73,6 +76,8 @@ class GraphClient:
             await self.client.users.by_user_id(
                 self.mailbox_address
             ).messages.by_message_id(message_id).patch(body=message_update)
-            print(f"Successfully marked message {message_id} as read.")
+            logger.info("Successfully marked message %s as read.", message_id)
         except APIError as e:
-            print(f"Graph API Error marking message {message_id} as read: {e.message}")
+            logger.error(
+                "Graph API Error marking message %s as read: %s", message_id, e.message
+            )

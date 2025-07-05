@@ -1,121 +1,124 @@
-import pika
 import json
+import logging
 from contextlib import closing
-from sqlalchemy.orm import Session
-from azure.core.exceptions import HttpResponseError
+import pika
 
 from core.database import get_db
 from core.models import EmailProcessingLog, ProcessingStatus
 from core.config import settings
+from core.rabbitmq_client import RabbitMQClient
+from api.schemas import EmailLogDetails
 from .ai_clients import DocumentIntelligenceClientWrapper, OpenAIClientWrapper
 from email_parser_service.blob_storage_client import AzureBlobStorageClient
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentAnalysisService:
     def __init__(self):
-        self.rabbitmq_connection = pika.BlockingConnection(
-            pika.URLParameters(
-                f"amqp://{settings.RABBITMQ_USER}:{settings.RABBITMQ_PASS}@{settings.RABBITMQ_HOST}:{settings.RABBITMQ_PORT}/%2F"
+        self.doc_intel_client = DocumentIntelligenceClientWrapper()
+        self.openai_client = OpenAIClientWrapper()
+        self.blob_storage_client = AzureBlobStorageClient()
+
+        self.rabbitmq_client = RabbitMQClient()
+        self.input_queue = settings.RABBITMQ_OUTPUT_QUEUE_NAME
+
+    def start_consuming(self):
+        connection = pika.BlockingConnection(pika.URLParameters(settings.RABBITMQ_URL))
+        channel = connection.channel()
+        channel.queue_declare(queue=self.input_queue, durable=True)
+        channel.basic_qos(prefetch_count=1)
+        channel.basic_consume(
+            queue=self.input_queue, on_message_callback=self.on_message
+        )
+        logger.info(
+            "Waiting for analysis tasks on '%s'. To exit press CTRL+C", self.input_queue
+        )
+        channel.start_consuming()
+
+    def on_message(self, channel, method, properties, body):
+        message_data = json.loads(body)
+        db_log_id = message_data.get("db_log_id")
+
+        logger.info(
+            "Received message for DB Log ID: %s. Starting processing...", db_log_id
+        )
+        try:
+            self.process_message(db_log_id)
+            channel.basic_ack(delivery_tag=method.delivery_tag)
+            logger.info(
+                "Successfully processed and acknowledged message for DB Log ID: %s",
+                db_log_id,
             )
-        )
-        self.rabbitmq_channel = self.rabbitmq_connection.channel()
-        self.rabbitmq_channel.queue_declare(
-            queue=settings.RABBITMQ_OUTPUT_QUEUE_NAME, durable=True
-        )
+        except Exception as e:
+            logger.error(
+                "A critical error occurred while processing message for DB Log ID: %s.",
+                db_log_id,
+            )
+            logger.error("Reason: %s", e)
+            logger.info("The message will be rejected and not requeued.")
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
     def process_message(self, db_log_id: int):
-        """Orchestrates the AI analysis for a given email log entry."""
-        ai_doc_client = DocumentIntelligenceClientWrapper()
-        ai_openai_client = OpenAIClientWrapper()
-        blob_client = AzureBlobStorageClient()
-
         with closing(next(get_db())) as db:
             log_entry = db.query(EmailProcessingLog).filter_by(id=db_log_id).first()
             if not log_entry:
-                raise Exception(f"Log entry with ID {db_log_id} not found.")
+                raise Exception(f"Log entry {db_log_id} not found.")
 
-            try:
-                log_entry.status = ProcessingStatus.ANALYZING
-                db.commit()
+            log_entry.status = ProcessingStatus.ANALYZING
+            db.commit()
 
-                # Run analysis tasks sequentially. This is simpler and more robust.
-                email_summary_result = ai_openai_client.summarize_email_body(
-                    log_entry.body
-                )
+            summary = self.openai_client.summarize_email_body(log_entry.body or "")
+            log_entry.email_summary = summary
 
-                attachments_data = log_entry.parsed_attachments_json or []
-                for attachment in attachments_data:
-                    blob_path = attachment.get("storage_path")
-                    if blob_path:
-                        try:
-                            blob_url_with_sas = blob_client.get_blob_sas_url(blob_path)
-                            analysis_result = ai_doc_client.split_and_identify_by_title(
-                                blob_url_with_sas
-                            )
-                            attachment["identified_documents"] = analysis_result
-                        except HttpResponseError as e:
-                            if "InvalidContent" in e.message:
-                                print(
-                                    f"  -> WARNING: Attachment '{attachment['original_filename']}' is corrupted. Marking as failed."
-                                )
-                                attachment["identified_documents"] = [
-                                    {
-                                        "doc_type": "failed_analysis",
-                                        "reason": "corrupted_or_unsupported",
-                                    }
-                                ]
-                            else:
-                                raise e
-
-                # Consolidate all results
-                log_entry.email_summary = email_summary_result
-                log_entry.parsed_attachments_json = attachments_data
-                log_entry.status = ProcessingStatus.PENDING_CONFIRMATION
-
-                db.merge(log_entry)
-                db.commit()
-                print(f"Successfully analyzed and updated DB Log ID: {db_log_id}")
-
-            except Exception as e:
-                print(f"!! FAILED analysis for DB log {db_log_id}: {e}")
-                db.rollback()
-                log_entry = db.query(EmailProcessingLog).filter_by(id=db_log_id).first()
-                log_entry.status = ProcessingStatus.FAILED_ANALYSIS
-                log_entry.error_message = str(e)
-                db.commit()
-                raise
-
-    def callback(self, ch, method, properties, body):
-        """Synchronous callback that processes one message at a time."""
-        message_body = json.loads(body.decode("utf-8"))
-        db_log_id = message_body.get("db_log_id")
-        print(
-            f"\n[ANALYZER] Received message for DB Log ID: {db_log_id}. Starting processing..."
-        )
-        try:
-            # Directly call the synchronous processing function. No asyncio needed.
-            self.process_message(db_log_id)
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-            print(
-                f"[ANALYZER] Successfully processed and acknowledged message for DB Log ID: {db_log_id}"
+            # Extract PO number from email subject and body
+            email_content = (
+                f"Subject: {log_entry.subject or ''}\n\n"
+                f"Body: {log_entry.body or ''}"
             )
-        except Exception as e:
-            print(
-                f"\n[ANALYZER-ERROR] A critical error occurred while processing message for DB Log ID: {db_log_id}."
-            )
-            print(f"      Reason: {e}")
-            print(f"      The message will be rejected and not requeued.")
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            po_number = self.openai_client.extract_purchase_order_number(email_content)
+            log_entry.purchase_order_number = po_number
 
-    def start_consuming(self):
-        self.rabbitmq_channel.basic_qos(prefetch_count=1)
-        self.rabbitmq_channel.basic_consume(
-            queue=settings.RABBITMQ_OUTPUT_QUEUE_NAME, on_message_callback=self.callback
-        )
-        print(
-            f"[ANALYZER-CONSUMER DEBUG] Listening on queue: '{settings.RABBITMQ_OUTPUT_QUEUE_NAME}'"
-        )
-        print(
-            f"[*] Waiting for analysis tasks on '{settings.RABBITMQ_OUTPUT_QUEUE_NAME}'. To exit press CTRL+C"
-        )
-        self.rabbitmq_channel.start_consuming()
+            attachments_data = log_entry.parsed_attachments_json or []
+            updated_attachments_data = []
+
+            # Process attachments if they exist
+            for attachment in attachments_data:
+                updated_attachment = attachment.copy()
+                if "storage_path" in attachment:
+
+                    # --- THIS IS THE CORRECTED LINE ---
+                    # Changed get_blob_url_with_sas -> get_blob_sas_url
+                    blob_url = self.blob_storage_client.get_blob_sas_url(
+                        attachment["storage_path"]
+                    )
+                    # --- END OF CORRECTION ---
+
+                    analysis_result = self.doc_intel_client.split_and_identify_by_title(
+                        blob_url
+                    )
+                    updated_attachment["identified_documents"] = analysis_result
+
+                updated_attachments_data.append(updated_attachment)
+
+            log_entry.parsed_attachments_json = updated_attachments_data
+
+            # Always move to PENDING_CONFIRMATION, whether attachments exist
+            log_entry.status = ProcessingStatus.PENDING_CONFIRMATION
+
+            db.commit()
+            db.refresh(log_entry)
+            logger.info("Successfully analyzed and updated DB Log ID: %s", db_log_id)
+
+            event_payload = {
+                "type": "ANALYSIS_COMPLETE",
+                "payload": EmailLogDetails.model_validate(log_entry).model_dump(
+                    mode="json"
+                ),
+            }
+            self.rabbitmq_client.publish_event_to_fanout(
+                settings.RABBITMQ_UI_NOTIFY_EXCHANGE, event_payload
+            )
+            logger.info(
+                "Sent event to exchange '%s'", settings.RABBITMQ_UI_NOTIFY_EXCHANGE
+            )

@@ -17,6 +17,7 @@ class ProcessingStatus(str, enum.Enum):
     PENDING_CONFIRMATION = (
         "PENDING_CONFIRMATION"  # Renamed from IDENTIFICATION_PENDING for clarity
     )
+    CONFIRMED = "CONFIRMED"
     COMPLETE = "COMPLETE"
     ARCHIVED_CC = "ARCHIVED_CC"
 
@@ -40,6 +41,7 @@ class EmailProcessingLog(Base):
     subject = Column(Text)
     body = Column(Text)
     email_summary = Column(Text)
+    purchase_order_number = Column(String(100))  # PO number field
     received_at = Column(DateTime(timezone=True), nullable=False)
     role_of_inbox = Column(Enum(RecipientRole), default=RecipientRole.UNKNOWN)
 

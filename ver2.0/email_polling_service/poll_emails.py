@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from contextlib import closing
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -11,6 +12,8 @@ from core.database import get_db
 from core.models import EmailProcessingLog, ProcessingStatus, RecipientRole
 from core.config import settings
 from .graph_client import GraphClient
+
+logger = logging.getLogger(__name__)
 
 
 def determine_role(message, mailbox_address: str) -> RecipientRole:
@@ -30,7 +33,7 @@ def determine_role(message, mailbox_address: str) -> RecipientRole:
 
 async def run_polling_cycle():
     """Polls emails and publishes tasks using the async aio-pika library."""
-    print(f"--- Starting email polling cycle at {datetime.now().isoformat()} ---")
+    logger.info("Starting email polling cycle at %s", datetime.now().isoformat())
 
     connection = None
     # Use async with for GraphClient, and a try/finally for RabbitMQ connection
@@ -50,11 +53,11 @@ async def run_polling_cycle():
                 with closing(next(get_db())) as db:
                     unread_messages = await graph_client.fetch_unread_messages()
                     if not unread_messages:
-                        print("No new unread messages found.")
+                        logger.info("No new unread messages found.")
                         return
 
-                    print(
-                        f"Found {len(unread_messages)} unread email(s). Processing..."
+                    logger.info(
+                        "Found %d unread email(s). Processing...", len(unread_messages)
                     )
                     for msg in unread_messages:
                         exists = (
@@ -63,8 +66,9 @@ async def run_polling_cycle():
                             .first()
                         )
                         if exists:
-                            print(
-                                f"Duplicate email detected (ID: {msg.internet_message_id}). Skipping."
+                            logger.info(
+                                "Duplicate email detected (ID: %s). Skipping.",
+                                msg.internet_message_id,
                             )
                             # await graph_client.mark_message_as_read(msg.id)
                             continue
@@ -101,32 +105,36 @@ async def run_polling_cycle():
                             await channel.default_exchange.publish(
                                 message, routing_key=settings.RABBITMQ_INPUT_QUEUE_NAME
                             )
-                            print(
-                                f"[AIO-PIKA] Successfully published message for db_log_id: {new_log.id}"
+                            logger.info(
+                                "Successfully published message for db_log_id: %s",
+                                new_log.id,
                             )
 
                             # await graph_client.mark_message_as_read(msg.id)
 
                             db.commit()
-                            print(
-                                f"Successfully processed and committed email. DB Log ID: {new_log.id}"
+                            logger.info(
+                                "Successfully processed and committed email. DB Log ID: %s",
+                                new_log.id,
                             )
 
                         except Exception as e:
-                            print(
-                                f"Error during transaction for email {msg.id}: {e}. Rolling back..."
+                            logger.error(
+                                "Error during transaction for email %s: %s. Rolling back...",
+                                msg.id,
+                                e,
                             )
                             db.rollback()
 
         except Exception as e:
-            print(f"A critical error occurred during the polling cycle: {e}")
+            logger.error("A critical error occurred during the polling cycle: %s", e)
         finally:
             # Ensure RabbitMQ connection is closed if it was opened
             if connection:
                 await connection.close()
-                print("[AIO-PIKA] RabbitMQ connection closed.")
+                logger.info("RabbitMQ connection closed.")
 
-    print(f"--- Email polling cycle finished at {datetime.now().isoformat()} ---")
+    logger.info("Email polling cycle finished at %s", datetime.now().isoformat())
 
 
 if __name__ == "__main__":

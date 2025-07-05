@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 from azure.storage.blob.aio import BlobServiceClient
 from core.config import settings
@@ -24,6 +24,22 @@ class AzureBlobStorageClient:
             settings.AZURE_STORAGE_CONNECTION_STRING
         )
         self.container_name = settings.AZURE_STORAGE_CONTAINER_NAME
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.aclose()
+
+    async def aclose(self):
+        """Close the blob service client to prevent resource leaks."""
+        try:
+            await self.blob_service_client.close()
+            print("Blob storage client resources closed.")
+        except Exception as e:
+            print(f"Error closing blob storage client resources: {e}")
 
     def sanitize_for_path(self, value: str) -> str:
         """Sanitizes a string to be safely used as a file/blob path component."""
@@ -62,7 +78,7 @@ class AzureBlobStorageClient:
             container_name=self.container_name,
             blob_name=blob_name,
             permission=BlobSasPermissions(read=True),
-            expiry=datetime.utcnow() + timedelta(hours=1),
+            expiry=datetime.now(timezone.utc) + timedelta(hours=1),
         )
 
         url = f"https://{self.account_name}.blob.core.windows.net/{self.container_name}/{blob_name}?{sas_token}"

@@ -2,6 +2,8 @@
 fastapi
 uvicorn[standard]
 websockets
+streamlit
+requests
 
 # Microsoft Graph SDK and Azure Identity
 msgraph-sdk
