@@ -1,0 +1,25 @@
+# Web framework and server
+fastapi
+fastapi-cors
+uvicorn[standard]
+websockets
+requests
+
+# Microsoft Graph SDK and Azure Identity
+msgraph-sdk
+azure-identity
+
+# RabbitMQ clients (blocking for services, async for API)
+pika
+aio-pika
+
+# For loading .env files
+python-dotenv
+
+# Azure SDKs (simplified - only blob storage and OpenAI)
+azure-storage-blob
+openai>=1.0.0
+
+# Database ORM
+SQLAlchemy
+psycopg2-binary
